@@ -112,11 +112,16 @@ def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> P
     tags, colours, positioning) are preserved.  For .srt files the
     ``subtitles`` filter is used with a forced TikTok-style look.
     """
+    if not captions_path.exists():
+        raise RuntimeError(f"Caption file does not exist: {captions_path}")
+    if captions_path.stat().st_size == 0:
+        raise RuntimeError(f"Caption file is empty: {captions_path}")
+
     inp = ffmpeg.input(str(video_path))
     safe = _ffmpeg_safe_path(captions_path)
 
     if captions_path.suffix.lower() == ".ass":
-        video = inp.video.filter("ass", filename=safe)
+        video = inp.video.filter("ass", safe)
     else:
         style = (
             "FontName=Arial,"
@@ -130,20 +135,27 @@ def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> P
             "Alignment=2,"
             "MarginV=220"
         )
-        video = inp.video.filter("subtitles", filename=safe, force_style=style)
+        video = inp.video.filter("subtitles", safe, force_style=style)
 
-    (
-        ffmpeg
-        .output(
-            video,
-            inp.audio,
-            str(out_path),
-            vcodec="libx264",
-            acodec="aac",
-            pix_fmt="yuv420p",
+    try:
+        (
+            ffmpeg
+            .output(
+                video,
+                inp.audio,
+                str(out_path),
+                vcodec="libx264",
+                acodec="aac",
+                pix_fmt="yuv420p",
+            )
+            .overwrite_output()
+            .run(capture_stdout=True, capture_stderr=True)
         )
-        .overwrite_output()
-        .run(quiet=True)
-    )
+    except ffmpeg.Error as exc:
+        stderr = exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else str(exc)
+        raise RuntimeError(f"FFmpeg caption burn failed for {captions_path}: {stderr}") from exc
+
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise RuntimeError(f"FFmpeg reported success but output missing/empty: {out_path}")
     return out_path
 
