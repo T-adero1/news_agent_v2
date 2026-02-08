@@ -1,0 +1,56 @@
+Metadata-Version: 2.4
+Name: tiktok-agent-v2
+Version: 0.1.0
+Summary: Transcript + motion based clip selection
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+
+# TikTok Agent V2 (Transcript + Motion)
+
+This repo builds clips by combining:
+- motion/visual energy scores, and
+- speech-to-text transcript analysis.
+
+Goal: identify key moments based on *what is said*, not just visuals, while still
+using motion score to avoid dull segments. Early segments can be preferred so if
+key info appears early, later content is deprioritized.
+
+## Features
+- Fast local speech-to-text with `faster-whisper`.
+- Motion scoring via OpenCV frame differences.
+- Transcript-driven key moment ranking with time-aware decay.
+- Clip extraction with `ffmpeg`.
+
+## Requirements
+- Python 3.9+
+- FFmpeg installed and available on PATH
+
+## Install
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
+```
+
+## Usage
+
+```bash
+python main.py \
+  --video /path/to/video.mp4 \
+  --out outputs \
+  --num-clips 3 \
+  --clip-duration 18 \
+  --min-gap 6 \
+  --prefer-early \
+  --format blur
+```
+
+## LLM Transcript Ranking
+Set `OPENAI_API_KEY` to enable LLM-based transcript importance scoring.
+You can disable it with `--no-llm` or change the model via `--llm-model`.
+
+## Notes
+- On first run, `faster-whisper` will download model weights.
+- Default model is `small` for speed/quality balance. Change with `--whisper-model`.
