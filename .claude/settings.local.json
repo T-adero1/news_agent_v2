@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(\"C:\\\\Users\\\\tobya\\\\OneDrive\\\\Desktop\\\\deal_project\\\\news_agent_v2\\\\ffmpeg.exe\" -version)",
+      "Bash(python -c:*)",
+      "Bash(python main.py:*)",
+      "Bash(pip install:*)",
+      "Bash(set \"PATH=%CD%;%PATH%\")",
+      "Bash(\".\\\\ffmpeg.exe\" -version)",
+      "Bash(cmd /c \"set PATH=C:\\\\Users\\\\tobya\\\\OneDrive\\\\Desktop\\\\deal_project\\\\news_agent_v2;%PATH% && python main.py --video YTDown.com_YouTube_Active-Murderers-Veteran-Cops-React-to-N_Media_Z4g3ZiyZYoo_001_1080p.mp4 --clip-duration 45 --device cpu --num-clips 1\")",
+      "Bash($env:PATH = \"C:\\\\Users\\\\tobya\\\\OneDrive\\\\Desktop\\\\deal_project\\\\news_agent_v2;$env:PATH\")",
+      "Bash(export PATH=\"/c/Users/tobya/OneDrive/Desktop/deal_project/news_agent_v2:$PATH\")",
+      "Bash(export:*)",
+      "Bash(ls:*)",
+      "Bash(ffprobe:*)"
+    ]
+  }
+}

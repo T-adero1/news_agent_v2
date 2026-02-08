@@ -93,3 +93,57 @@ def format_tiktok_center_crop(video_path: Path, out_path: Path, width: int = 108
     )
     return out_path
 
+
+def _ffmpeg_safe_path(path: Path) -> str:
+    """Return a path string safe for FFmpeg filter arguments on Windows.
+
+    FFmpeg filter syntax treats colons and backslashes specially.
+    Convert to forward slashes and escape colons (e.g. C: -> C\\:).
+    """
+    posix = str(path).replace("\\", "/")
+    posix = posix.replace(":", "\\:")
+    return posix
+
+
+def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> Path:
+    """Burn subtitle captions into video.
+
+    For .ass files the ``ass`` filter is used so embedded styles (karaoke
+    tags, colours, positioning) are preserved.  For .srt files the
+    ``subtitles`` filter is used with a forced TikTok-style look.
+    """
+    inp = ffmpeg.input(str(video_path))
+    safe = _ffmpeg_safe_path(captions_path)
+
+    if captions_path.suffix.lower() == ".ass":
+        video = inp.video.filter("ass", filename=safe)
+    else:
+        style = (
+            "FontName=Arial,"
+            "FontSize=14,"
+            "PrimaryColour=&H00FFFFFF,"
+            "OutlineColour=&H00000000,"
+            "BorderStyle=1,"
+            "Outline=3,"
+            "Shadow=0,"
+            "Bold=1,"
+            "Alignment=2,"
+            "MarginV=220"
+        )
+        video = inp.video.filter("subtitles", filename=safe, force_style=style)
+
+    (
+        ffmpeg
+        .output(
+            video,
+            inp.audio,
+            str(out_path),
+            vcodec="libx264",
+            acodec="aac",
+            pix_fmt="yuv420p",
+        )
+        .overwrite_output()
+        .run(quiet=True)
+    )
+    return out_path
+

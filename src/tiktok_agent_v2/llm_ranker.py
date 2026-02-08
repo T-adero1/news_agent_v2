@@ -138,7 +138,7 @@ def score_segments_with_llm(
 
         payload = {
             "model": model,
-            "max_output_tokens": 4096,
+            "max_output_tokens": 5000,
             "input": [
                 {
                     "role": "system",

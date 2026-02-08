@@ -15,17 +15,48 @@ from tiktok_agent_v2.ffmpeg_utils import (
     clip_video,
     format_tiktok_blur,
     format_tiktok_center_crop,
+    burn_in_captions,
 )
 from tiktok_agent_v2.motion import compute_motion_scores, aggregate_motion_for_window
 from tiktok_agent_v2.transcript import transcribe
 from tiktok_agent_v2.ranker import score_transcript_segments, apply_time_decay, normalize
 from tiktok_agent_v2.llm_ranker import score_segments_with_llm
+from tiktok_agent_v2.captions import create_clip_captions_ass
 
 console = Console()
 log = logging.getLogger("tiktok_agent_v2.pipeline")
 
 # Max seconds we'll extend or contract a clip boundary to reach a sentence edge
 _SNAP_TOLERANCE = 5.0
+
+
+def _segments_in_window(segments, start, end):
+    return [s for s in segments if s["end"] >= start and s["start"] <= end]
+
+
+def _write_full_transcript(segments, out_path: Path):
+    lines = ["# Full Transcript", ""]
+    for seg in segments:
+        lines.append(f"[{seg['start']:7.2f}s - {seg['end']:7.2f}s] {seg['text']}")
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_clip_transcript(clip_idx: int, clip_start: float, clip_end: float, segments, out_path: Path):
+    lines = [
+        f"# Clip {clip_idx:02d} Transcript",
+        f"Window: {clip_start:.2f}s - {clip_end:.2f}s",
+        "",
+    ]
+    for seg in _segments_in_window(segments, clip_start, clip_end):
+        raw = seg.get("text_score", 0.0)
+        txt = seg.get("text_norm", 0.0)
+        mot = seg.get("motion_norm", 0.0)
+        cmb = seg.get("combined_score", 0.0)
+        lines.append(
+            f"[{seg['start']:7.2f}s - {seg['end']:7.2f}s] "
+            f"raw={raw:.3f} txt={txt:.3f} mot={mot:.3f} cmb={cmb:.3f} | {seg['text']}"
+        )
+    out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _snap_to_sentences(start, end, segments, video_duration):
@@ -99,6 +130,10 @@ def run_pipeline(
     llm_model,
     llm_batch_size: int,
     llm_timeout_s: int,
+    captions_enabled: bool,
+    captions_max_words: int,
+    captions_max_chars: int,
+    strict_llm: bool = False,
 ):
     if not video_path.exists():
         raise FileNotFoundError(video_path)
@@ -117,6 +152,9 @@ def run_pipeline(
     log.info("=== TRANSCRIPT SEGMENTS ===")
     for seg in segments:
         log.info("  [%6.1fs - %6.1fs] %s", seg["start"], seg["end"], seg["text"])
+    full_transcript_path = out_dir / "transcript_full.txt"
+    _write_full_transcript(segments, full_transcript_path)
+    log.info("Wrote full transcript: %s", full_transcript_path)
 
     console.print("[bold]3) Motion scoring[/bold]")
     motion_scores = compute_motion_scores(video_path, sample_fps=motion_fps)
@@ -129,8 +167,9 @@ def run_pipeline(
 
     llm_scores = {}
     if llm_model:
-        import os
         if not os.environ.get("OPENAI_API_KEY"):
+            if strict_llm:
+                raise RuntimeError("OPENAI_API_KEY not set, but strict LLM mode is enabled.")
             console.print("[yellow]Warning: OPENAI_API_KEY not set — falling back to heuristic scoring[/yellow]")
         else:
             console.print(f"Using LLM model: {llm_model}")
@@ -149,6 +188,8 @@ def run_pipeline(
             log.info("  id=%2d [%6.1fs-%6.1fs] llm=%.3f  %s",
                      seg["id"], seg["start"], seg["end"], raw, seg["text"][:80])
     else:
+        if strict_llm and llm_model:
+            raise RuntimeError("Strict LLM mode enabled, but no LLM scores were returned.")
         log.info("No LLM scores — using heuristic fallback")
         segments = score_transcript_segments(segments)
 
@@ -171,6 +212,8 @@ def run_pipeline(
         combined = (text_weight * tscore) + (motion_weight * mscore)
         if prefer_early:
             combined = apply_time_decay(combined, seg["start"], early_half_life)
+        seg["text_norm"] = tscore
+        seg["motion_norm"] = mscore
         seg["combined_score"] = combined
         ranked.append(seg)
 
@@ -245,12 +288,42 @@ def run_pipeline(
     for idx, seg in enumerate(selected, start=1):
         raw_path = out_dir / f"clip_{idx:02d}_{int(seg['start'])}s_{int(seg['end'])}s_raw.mp4"
         final_path = out_dir / f"clip_{idx:02d}_{int(seg['start'])}s_{int(seg['end'])}s.mp4"
+        captioned_path = out_dir / f"clip_{idx:02d}_{int(seg['start'])}s_{int(seg['end'])}s_captioned.mp4"
+        captions_path = out_dir / f"clip_{idx:02d}_{int(seg['start'])}s_{int(seg['end'])}s.ass"
+        clip_transcript_path = out_dir / f"clip_{idx:02d}_{int(seg['start'])}s_{int(seg['end'])}s_transcript.txt"
+
+        _write_clip_transcript(
+            clip_idx=idx,
+            clip_start=seg["start"],
+            clip_end=seg["end"],
+            segments=segments,
+            out_path=clip_transcript_path,
+        )
+        log.info("Wrote clip transcript: %s", clip_transcript_path)
+
         clip_video(video_path, seg["start"], seg["end"], raw_path)
 
         if format_method == "center-crop":
             format_tiktok_center_crop(raw_path, final_path, out_width, out_height)
         else:
             format_tiktok_blur(raw_path, final_path, out_width, out_height)
+
+        if captions_enabled:
+            has_captions = create_clip_captions_ass(
+                segments=segments,
+                clip_start=seg["start"],
+                clip_end=seg["end"],
+                out_path=captions_path,
+                max_words=captions_max_words,
+                max_chars=captions_max_chars,
+            )
+            if has_captions:
+                burn_in_captions(final_path, captions_path, captioned_path)
+                if final_path.exists() and captioned_path.exists():
+                    final_path.unlink()
+                    captioned_path.rename(final_path)
+                if captions_path.exists():
+                    captions_path.unlink()
 
         # Clean up raw intermediate file
         if raw_path.exists() and final_path.exists():
