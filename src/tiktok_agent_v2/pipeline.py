@@ -30,6 +30,14 @@ log = logging.getLogger("tiktok_agent_v2.pipeline")
 _SNAP_TOLERANCE = 5.0
 
 
+def _flush_log_handlers():
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+
+
 def _segments_in_window(segments, start, end):
     return [s for s in segments if s["end"] >= start and s["start"] <= end]
 
@@ -311,41 +319,55 @@ def run_pipeline(
 
         if captions_enabled:
             caption_mode_used = None
+            log.info("=== CAPTION FLOW (clip %d) ===", idx)
+            log.info("Clip %d caption inputs: video=%s start=%.2fs end=%.2fs", idx, final_path, seg["start"], seg["end"])
             try:
-                has_ass = create_clip_captions_ass(
+                log.info("Clip %d captions: generating SRT file %s", idx, captions_srt_path)
+                has_srt = create_clip_captions_srt(
                     segments=segments,
                     clip_start=seg["start"],
                     clip_end=seg["end"],
-                    out_path=captions_ass_path,
+                    out_path=captions_srt_path,
                     max_words=captions_max_words,
                     max_chars=captions_max_chars,
                 )
-                if not has_ass:
-                    raise RuntimeError(f"ASS caption generation returned no cues: {captions_ass_path}")
-                burn_in_captions(final_path, captions_ass_path, captioned_path)
-                caption_mode_used = "ASS"
-            except Exception as ass_error:
-                log.exception("Clip %d caption attempt with ASS failed. Falling back to SRT.", idx)
+                if not has_srt:
+                    raise RuntimeError(f"SRT caption generation returned no cues: {captions_srt_path}")
+                log.info(
+                    "Clip %d captions: SRT generated (%d bytes), burning into video",
+                    idx,
+                    captions_srt_path.stat().st_size if captions_srt_path.exists() else 0,
+                )
+                burn_in_captions(final_path, captions_srt_path, captioned_path)
+                caption_mode_used = "SRT"
+            except Exception as srt_error:
+                log.exception("Clip %d caption attempt with SRT failed. Falling back to ASS.", idx)
                 if captioned_path.exists():
                     captioned_path.unlink()
                 try:
-                    has_srt = create_clip_captions_srt(
+                    log.info("Clip %d captions: generating ASS fallback file %s", idx, captions_ass_path)
+                    has_ass = create_clip_captions_ass(
                         segments=segments,
                         clip_start=seg["start"],
                         clip_end=seg["end"],
-                        out_path=captions_srt_path,
+                        out_path=captions_ass_path,
                         max_words=captions_max_words,
                         max_chars=captions_max_chars,
                     )
-                    if not has_srt:
-                        raise RuntimeError(f"SRT caption generation returned no cues: {captions_srt_path}")
-                    burn_in_captions(final_path, captions_srt_path, captioned_path)
-                    caption_mode_used = "SRT"
-                except Exception as srt_error:
+                    if not has_ass:
+                        raise RuntimeError(f"ASS caption generation returned no cues: {captions_ass_path}")
+                    log.info(
+                        "Clip %d captions: ASS generated (%d bytes), burning into video",
+                        idx,
+                        captions_ass_path.stat().st_size if captions_ass_path.exists() else 0,
+                    )
+                    burn_in_captions(final_path, captions_ass_path, captioned_path)
+                    caption_mode_used = "ASS"
+                except Exception as ass_error:
                     raise RuntimeError(
                         f"Caption burn failed for clip {idx}. "
-                        f"ASS error: {ass_error}. SRT error: {srt_error}"
-                    ) from srt_error
+                        f"SRT error: {srt_error}. ASS error: {ass_error}"
+                    ) from ass_error
 
             if final_path.exists() and captioned_path.exists():
                 final_path.unlink()
@@ -353,12 +375,14 @@ def run_pipeline(
                 log.info("Clip %d caption burn succeeded with %s (%s)", idx, caption_mode_used, final_path)
             else:
                 raise RuntimeError(f"Caption burn-in failed for clip {idx}: {final_path}")
+            log.info("=== END CAPTION FLOW (clip %d) ===", idx)
 
         # Clean up raw intermediate file
         if raw_path.exists() and final_path.exists():
             raw_path.unlink()
 
         console.print(f"Saved {final_path.name} | score={seg['score']:.3f} | {seg['text']}")
+        _flush_log_handlers()
 
     # Clean up intermediate audio file
     if audio_path.exists():

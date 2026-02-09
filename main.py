@@ -1,8 +1,13 @@
 import argparse
+import atexit
+import faulthandler
 import logging
 import os
-import shutil
+import signal
+import sys
+import threading
 from pathlib import Path
+
 from tiktok_agent_v2.pipeline import run_pipeline
 
 
@@ -12,21 +17,76 @@ def parse_args():
     return parser.parse_args()
 
 
+def _flush_all_log_handlers():
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+
+
+def _install_runtime_logging_guards(log_path: Path, fault_path: Path):
+    log = logging.getLogger("tiktok_agent_v2.main")
+
+    try:
+        fault_file = open(fault_path, "a", encoding="utf-8")
+        faulthandler.enable(file=fault_file, all_threads=True)
+    except Exception:
+        log.exception("Failed to enable faulthandler")
+
+    def _log_uncaught(exc_type, exc_value, exc_traceback):
+        log.critical("UNCAUGHT EXCEPTION", exc_info=(exc_type, exc_value, exc_traceback))
+        _flush_all_log_handlers()
+
+    def _log_thread_exception(args):
+        log.critical(
+            "UNCAUGHT THREAD EXCEPTION in %s",
+            getattr(args.thread, "name", "<unknown>"),
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+        _flush_all_log_handlers()
+
+    def _log_unraisable(unraisable):
+        log.critical(
+            "UNRAISABLE EXCEPTION: %s",
+            getattr(unraisable, "err_msg", "<no message>"),
+            exc_info=(type(unraisable.exc_value), unraisable.exc_value, unraisable.exc_traceback),
+        )
+        _flush_all_log_handlers()
+
+    def _signal_handler(signum, _frame):
+        try:
+            signame = signal.Signals(signum).name
+        except Exception:
+            signame = "UNKNOWN"
+        log.critical("RECEIVED SIGNAL %s (%s) - terminating", signum, signame)
+        _flush_all_log_handlers()
+        raise SystemExit(128 + signum)
+
+    sys.excepthook = _log_uncaught
+    threading.excepthook = _log_thread_exception
+    sys.unraisablehook = _log_unraisable
+
+    for signame in ("SIGTERM", "SIGINT", "SIGBREAK"):
+        if hasattr(signal, signame):
+            signal.signal(getattr(signal, signame), _signal_handler)
+
+    atexit.register(_flush_all_log_handlers)
+    log.info("Runtime logging guards enabled")
+    log.info("Main log: %s", log_path)
+    log.info("Fault log: %s", fault_path)
+
+
 def main():
     args = parse_args()
     video_path = Path(args.video).expanduser()
     out_dir = Path("outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
-    for item in out_dir.iterdir():
-        if item.is_dir():
-            shutil.rmtree(item)
-        else:
-            item.unlink()
     if not os.environ.get("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY must be set. This script is hardcoded to use gpt-5-mini.")
 
-    # Set up logging — file gets everything, console gets a summary
     log_path = out_dir / "pipeline.log"
+    fault_path = out_dir / "fault.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(message)s",
@@ -35,9 +95,11 @@ def main():
             logging.FileHandler(log_path, mode="w"),
             logging.StreamHandler(),
         ],
+        force=True,
     )
     logging.getLogger("tiktok_agent_v2").setLevel(logging.INFO)
     print(f"Detailed logs -> {log_path}")
+    _install_runtime_logging_guards(log_path=log_path, fault_path=fault_path)
 
     run_pipeline(
         video_path=video_path,

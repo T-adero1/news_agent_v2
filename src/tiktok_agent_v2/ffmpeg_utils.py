@@ -1,5 +1,8 @@
 from pathlib import Path
+import logging
 import ffmpeg
+
+log = logging.getLogger("tiktok_agent_v2.ffmpeg_utils")
 
 
 def extract_audio(video_path: Path, wav_path: Path) -> Path:
@@ -117,12 +120,21 @@ def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> P
     if captions_path.stat().st_size == 0:
         raise RuntimeError(f"Caption file is empty: {captions_path}")
 
+    log.info(
+        "Burning captions: video=%s captions=%s out=%s",
+        video_path,
+        captions_path,
+        out_path,
+    )
+
     inp = ffmpeg.input(str(video_path))
     safe = _ffmpeg_safe_path(captions_path)
 
     if captions_path.suffix.lower() == ".ass":
+        log.info("Caption renderer mode: ASS")
         video = inp.video.filter("ass", safe)
     else:
+        log.info("Caption renderer mode: SRT/subtitles")
         style = (
             "FontName=Arial,"
             "FontSize=14,"
@@ -157,5 +169,6 @@ def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> P
 
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise RuntimeError(f"FFmpeg reported success but output missing/empty: {out_path}")
+    log.info("Caption burn complete: %s (%d bytes)", out_path, out_path.stat().st_size)
     return out_path
 
