@@ -14,7 +14,8 @@
       "Bash(export PATH=\"/c/Users/tobya/OneDrive/Desktop/deal_project/news_agent_v2:$PATH\")",
       "Bash(export:*)",
       "Bash(ls:*)",
-      "Bash(ffprobe:*)"
+      "Bash(ffprobe:*)",
+      "Bash(python:*)"
     ]
   }
 }

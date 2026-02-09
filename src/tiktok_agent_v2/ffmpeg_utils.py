@@ -1,5 +1,6 @@
 from pathlib import Path
 import logging
+import subprocess
 import ffmpeg
 
 log = logging.getLogger("tiktok_agent_v2.ffmpeg_utils")
@@ -109,7 +110,11 @@ def _ffmpeg_safe_path(path: Path) -> str:
 
 
 def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> Path:
-    """Burn subtitle captions into video.
+    """Burn subtitle captions into video using subprocess.
+
+    Uses subprocess instead of ffmpeg-python because the latter over-escapes
+    Windows paths (colons, backslashes) in filter arguments, causing libass
+    to silently fail to open the file.
 
     For .ass files the ``ass`` filter is used so embedded styles (karaoke
     tags, colours, positioning) are preserved.  For .srt files the
@@ -127,12 +132,11 @@ def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> P
         out_path,
     )
 
-    inp = ffmpeg.input(str(video_path))
     safe = _ffmpeg_safe_path(captions_path)
 
     if captions_path.suffix.lower() == ".ass":
         log.info("Caption renderer mode: ASS")
-        video = inp.video.filter("ass", safe)
+        vf = f"ass='{safe}'"
     else:
         log.info("Caption renderer mode: SRT/subtitles")
         style = (
@@ -147,25 +151,23 @@ def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> P
             "Alignment=2,"
             "MarginV=220"
         )
-        video = inp.video.filter("subtitles", safe, force_style=style)
+        vf = f"subtitles='{safe}':force_style='{style}'"
 
-    try:
-        (
-            ffmpeg
-            .output(
-                video,
-                inp.audio,
-                str(out_path),
-                vcodec="libx264",
-                acodec="aac",
-                pix_fmt="yuv420p",
-            )
-            .overwrite_output()
-            .run(capture_stdout=True, capture_stderr=True)
-        )
-    except ffmpeg.Error as exc:
-        stderr = exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else str(exc)
-        raise RuntimeError(f"FFmpeg caption burn failed for {captions_path}: {stderr}") from exc
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-vf", vf,
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        "-pix_fmt", "yuv420p",
+        str(out_path),
+    ]
+    log.info("FFmpeg command: %s", cmd)
+
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="ignore")
+        raise RuntimeError(f"FFmpeg caption burn failed (rc={result.returncode}): {stderr}")
 
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise RuntimeError(f"FFmpeg reported success but output missing/empty: {out_path}")

@@ -318,63 +318,33 @@ def run_pipeline(
             format_tiktok_blur(raw_path, final_path, out_width, out_height)
 
         if captions_enabled:
-            caption_mode_used = None
             log.info("=== CAPTION FLOW (clip %d) ===", idx)
             log.info("Clip %d caption inputs: video=%s start=%.2fs end=%.2fs", idx, final_path, seg["start"], seg["end"])
-            try:
-                log.info("Clip %d captions: generating SRT file %s", idx, captions_srt_path)
-                has_srt = create_clip_captions_srt(
-                    segments=segments,
-                    clip_start=seg["start"],
-                    clip_end=seg["end"],
-                    out_path=captions_srt_path,
-                    max_words=captions_max_words,
-                    max_chars=captions_max_chars,
-                )
-                if not has_srt:
-                    raise RuntimeError(f"SRT caption generation returned no cues: {captions_srt_path}")
-                log.info(
-                    "Clip %d captions: SRT generated (%d bytes), burning into video",
-                    idx,
-                    captions_srt_path.stat().st_size if captions_srt_path.exists() else 0,
-                )
-                burn_in_captions(final_path, captions_srt_path, captioned_path)
-                caption_mode_used = "SRT"
-            except Exception as srt_error:
-                log.exception("Clip %d caption attempt with SRT failed. Falling back to ASS.", idx)
-                if captioned_path.exists():
-                    captioned_path.unlink()
-                try:
-                    log.info("Clip %d captions: generating ASS fallback file %s", idx, captions_ass_path)
-                    has_ass = create_clip_captions_ass(
-                        segments=segments,
-                        clip_start=seg["start"],
-                        clip_end=seg["end"],
-                        out_path=captions_ass_path,
-                        max_words=captions_max_words,
-                        max_chars=captions_max_chars,
-                    )
-                    if not has_ass:
-                        raise RuntimeError(f"ASS caption generation returned no cues: {captions_ass_path}")
-                    log.info(
-                        "Clip %d captions: ASS generated (%d bytes), burning into video",
-                        idx,
-                        captions_ass_path.stat().st_size if captions_ass_path.exists() else 0,
-                    )
-                    burn_in_captions(final_path, captions_ass_path, captioned_path)
-                    caption_mode_used = "ASS"
-                except Exception as ass_error:
-                    raise RuntimeError(
-                        f"Caption burn failed for clip {idx}. "
-                        f"SRT error: {srt_error}. ASS error: {ass_error}"
-                    ) from ass_error
 
-            if final_path.exists() and captioned_path.exists():
+            has_ass = create_clip_captions_ass(
+                segments=segments,
+                clip_start=seg["start"],
+                clip_end=seg["end"],
+                out_path=captions_ass_path,
+                max_words=captions_max_words,
+                max_chars=captions_max_chars,
+            )
+            if has_ass:
+                log.info(
+                    "Clip %d captions: ASS generated (%d bytes), burning into video",
+                    idx,
+                    captions_ass_path.stat().st_size if captions_ass_path.exists() else 0,
+                )
+                burn_in_captions(final_path, captions_ass_path, captioned_path)
+            else:
+                log.warning("Clip %d: ASS generation failed, no captions for this clip", idx)
+
+            if captioned_path.exists():
                 final_path.unlink()
                 captioned_path.rename(final_path)
-                log.info("Clip %d caption burn succeeded with %s (%s)", idx, caption_mode_used, final_path)
-            else:
-                raise RuntimeError(f"Caption burn-in failed for clip {idx}: {final_path}")
+                log.info("Clip %d caption burn succeeded (%s)", idx, final_path)
+            if captions_ass_path.exists():
+                captions_ass_path.unlink()
             log.info("=== END CAPTION FLOW (clip %d) ===", idx)
 
         # Clean up raw intermediate file

@@ -104,7 +104,7 @@ def main():
     run_pipeline(
         video_path=video_path,
         out_dir=out_dir,
-        num_clips=3,
+        num_clips=1,
         clip_duration=45.0,
         min_gap=6.0,
         prefer_early=False,
