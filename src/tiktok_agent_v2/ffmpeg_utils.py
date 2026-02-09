@@ -158,6 +158,7 @@ def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> P
         "-i", str(video_path),
         "-vf", vf,
         "-c:v", "libx264",
+        "-preset", "ultrafast",
         "-c:a", "aac",
         "-pix_fmt", "yuv420p",
         str(out_path),
