@@ -11,6 +11,7 @@ Required env vars in .env:
     TELEGRAM_BOT_TOKEN
     TELEGRAM_CHAT_ID
 """
+from __future__ import annotations
 
 import atexit
 import json
