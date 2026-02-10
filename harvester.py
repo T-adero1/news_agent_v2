@@ -615,8 +615,7 @@ def send_to_telegram(clip_path: Path, story_title: str, story_url: str) -> bool:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
-    domain = urlparse(story_url).netloc or story_url
-    caption = f"<b>{story_title}</b>\n\nSource: {domain}"
+    caption = f"<b>{story_title}</b>\n\nSource: {story_url}"
     if len(caption) > 1024:
         caption = caption[:1021] + "..."
 
