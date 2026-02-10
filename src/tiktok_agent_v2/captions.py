@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 import re
 from typing import List, Tuple
@@ -192,7 +194,37 @@ def _build_karaoke_line(words_in_chunk: List[Tuple[float, float, str]]) -> str:
     return " ".join(parts)
 
 
-_ASS_HEADER = """\
+def _pick_font() -> str:
+    """Return the best available bold sans-serif font name for ASS captions.
+
+    Checks for bundled font first, then queries system fonts via fc-list.
+    Falls back to 'Liberation Sans' (bundled) or 'sans-serif' (fontconfig alias).
+    """
+    # Check for bundled font first
+    _bundled = Path(__file__).resolve().parent / "fonts" / "LiberationSans-Bold.ttf"
+    if _bundled.exists():
+        return "Liberation Sans"
+
+    import shutil
+    if shutil.which("fc-list"):
+        import subprocess as _sp
+        try:
+            out = _sp.run(
+                ["fc-list", "--format", "%{family}\n"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+            families = {f.strip() for f in out.splitlines() if f.strip()}
+            for candidate in ["Arial", "Liberation Sans", "DejaVu Sans", "Noto Sans"]:
+                if candidate in families:
+                    return candidate
+        except Exception:
+            pass
+    return "Liberation Sans"
+
+
+def _build_ass_header(font_name: str | None = None) -> str:
+    fn = font_name or _pick_font()
+    return f"""\
 [Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -201,7 +233,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,72,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,40,40,400,1
+Style: Default,{fn},72,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,40,40,400,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -258,5 +290,5 @@ def create_clip_captions_ass(
     if not events:
         return False
 
-    out_path.write_text(_ASS_HEADER + "\n".join(events) + "\n", encoding="utf-8")
+    out_path.write_text(_build_ass_header() + "\n".join(events) + "\n", encoding="utf-8")
     return True

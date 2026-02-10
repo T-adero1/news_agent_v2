@@ -138,9 +138,28 @@ def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> P
 
     safe = _ffmpeg_safe_path(captions_path)
 
+    # Try to locate a fonts directory for libass.
+    # If a bundled fonts/ dir exists next to the package, use it.
+    # Otherwise try the system fonts directory.
+    fonts_dir = None
+    _bundled_fonts = Path(__file__).resolve().parent / "fonts"
+    if _bundled_fonts.is_dir():
+        fonts_dir = _bundled_fonts
+    else:
+        for p in [Path("/usr/share/fonts"), Path("/usr/local/share/fonts")]:
+            if p.is_dir():
+                fonts_dir = p
+                break
+    if fonts_dir:
+        log.info("Using fontsdir: %s", fonts_dir)
+
     if captions_path.suffix.lower() == ".ass":
         log.info("Caption renderer mode: ASS")
-        vf = f"ass={safe}"
+        if fonts_dir:
+            safe_fonts = _ffmpeg_safe_path(fonts_dir)
+            vf = f"ass={safe}:fontsdir={safe_fonts}"
+        else:
+            vf = f"ass={safe}"
     else:
         log.info("Caption renderer mode: SRT/subtitles")
         style = (
@@ -178,7 +197,14 @@ def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> P
 
     # Log stderr even on success — libass warnings (font not found, etc.) appear here
     if stderr_text:
-        for line in stderr_text.strip().split("\n")[-15:]:
+        lines = stderr_text.strip().split("\n")
+        # Always log warnings about fonts/libass (they appear early, before progress)
+        for line in lines:
+            ll = line.lower()
+            if any(kw in ll for kw in ["libass", "fontconfig", "font", "glyph", "fontsdir"]):
+                log.warning("  ffmpeg (font): %s", line.rstrip())
+        # Also log the last 15 lines (encoding summary)
+        for line in lines[-15:]:
             log.info("  ffmpeg: %s", line.rstrip())
 
     if not out_path.exists() or out_path.stat().st_size == 0:

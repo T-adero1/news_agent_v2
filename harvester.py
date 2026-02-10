@@ -436,6 +436,96 @@ def _try_html_fallback(url: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# MSN Article API extraction
+# ---------------------------------------------------------------------------
+
+_MSN_API = "https://assets.msn.com/content/view/v2/Detail/en-us/{}"
+_MSN_HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+
+
+def _try_msn_api(url: str) -> list:
+    """Extract videos from MSN articles via their public JSON API.
+
+    MSN pages are fully JS-rendered so yt-dlp/HTML scraping find nothing.
+    The API at assets.msn.com returns article body (with embedded video IDs)
+    and video metadata (with direct MP4 URLs on Akamai CDN).
+
+    Returns list of {url, title, duration} dicts.
+    """
+    # Extract article ID from URL (the part after /ar-)
+    m = re.search(r'/ar-([A-Za-z0-9]+)', url)
+    if not m:
+        log.info("  MSN API: no article ID found in URL")
+        return []
+    article_id = m.group(1)
+    log.info("  MSN API: article ID = %s", article_id)
+
+    # Fetch article metadata
+    try:
+        resp = requests.get(_MSN_API.format(article_id), headers=_MSN_HEADERS, timeout=15)
+        resp.raise_for_status()
+        article = resp.json()
+    except Exception as exc:
+        log.warning("  MSN API: article fetch failed: %s", exc)
+        return []
+
+    source_url = article.get("sourceHref", "")
+    if source_url:
+        log.info("  MSN API: original source = %s", source_url[:120])
+
+    # Find video IDs embedded in the article body
+    body = article.get("body", "")
+    video_ids = re.findall(r'data-document-id="cms/api/amp/video/([^"]+)"', body)
+    if not video_ids:
+        log.info("  MSN API: no embedded videos in article body")
+        # Return original source URL so caller can try probing that instead
+        if source_url:
+            return [{"_source_url": source_url}]
+        return []
+
+    log.info("  MSN API: found %d video ID(s): %s", len(video_ids), video_ids)
+
+    videos = []
+    for vid_id in video_ids:
+        try:
+            vresp = requests.get(_MSN_API.format(vid_id), headers=_MSN_HEADERS, timeout=15)
+            vresp.raise_for_status()
+            vdata = vresp.json()
+        except Exception as exc:
+            log.warning("  MSN API: video %s fetch failed: %s", vid_id, exc)
+            continue
+
+        vmeta = vdata.get("videoMetadata", {})
+        duration = vmeta.get("playTime", 0)
+        title = vdata.get("title", "Untitled")
+
+        # Find best MP4 — prefer format "1001" (single 720p), then highest resolution
+        mp4_files = [
+            f for f in vmeta.get("externalVideoFiles", [])
+            if f.get("contentType") == "video/mp4" and f.get("url")
+        ]
+        if not mp4_files:
+            log.info("  MSN API: video %s has no MP4 files", vid_id)
+            continue
+
+        best = max(mp4_files, key=lambda f: (f.get("width", 0) * f.get("height", 0)))
+        mp4_url = best["url"]
+        w, h = best.get("width", 0), best.get("height", 0)
+        log.info("  MSN API: video '%s' — %ds, %dx%d — %s", title[:60], duration, w, h, mp4_url[:100])
+
+        if 60 <= duration <= 900:
+            videos.append({"url": mp4_url, "title": title, "duration": duration})
+        else:
+            log.info("  MSN API: skipping (duration %ds, need 60-900s)", duration)
+
+    if not videos and source_url:
+        log.info("  MSN API: no suitable videos, returning source URL for fallback probe")
+        return [{"_source_url": source_url}]
+
+    return videos
+
+
+# ---------------------------------------------------------------------------
 # Video Discovery (yt-dlp probe)
 # ---------------------------------------------------------------------------
 
@@ -445,6 +535,21 @@ def probe_page_for_videos(url: str) -> list:
     Returns list of dicts: [{url, title, duration}, ...] filtered to 1-15 min.
     """
     log.info("Probing for videos: %s", url)
+
+    # MSN articles are JS-rendered — use their public JSON API instead of yt-dlp
+    if "msn.com/" in url and "/ar-" in url:
+        msn_results = _try_msn_api(url)
+        if msn_results:
+            # Check if we got actual videos or just a source URL redirect
+            real_videos = [v for v in msn_results if "url" in v]
+            if real_videos:
+                return real_videos
+            # Got source URL — probe the original article instead
+            source_url = msn_results[0].get("_source_url", "")
+            if source_url:
+                log.info("  Redirecting probe to original source: %s", source_url[:120])
+                return probe_page_for_videos(source_url)
+        return []
 
     cmd = [*YTDLP_CMD, "--dump-json", "--no-download", url]
     try:
@@ -494,15 +599,36 @@ def probe_page_for_videos(url: str) -> list:
 
     # Detect rendition-list pages (e.g. click2houston JW Player embeds):
     # many variants of the same video at 0s duration with direct MP4 URLs.
+    # First strip out recommendation-widget items (AnyClip etc.) which can
+    # produce 100-250+ items from their own CDN, then check what remains.
+    _WIDGET_DOMAINS = {"anyclip.com", "anyclip-media.com", "lura.live"}
     if not videos and len(zero_duration_items) >= 10:
-        log.info("  Detected rendition list (%d variants at 0s duration)", len(zero_duration_items))
-        best = _pick_best_rendition(zero_duration_items)
-        if best:
-            vid_url = best.get("url") or best.get("webpage_url") or url
-            vid_title = best.get("title") or "Untitled"
-            w, h = best.get("width") or 0, best.get("height") or 0
-            log.info("  Picked best rendition: %dx%d — %s", w, h, vid_url[:120])
-            videos.append({"url": vid_url, "title": vid_title, "duration": 0})
+        filtered = [
+            item for item in zero_duration_items
+            if not any(
+                wd in (item.get("url") or item.get("webpage_url") or "")
+                for wd in _WIDGET_DOMAINS
+            )
+        ]
+        widget_count = len(zero_duration_items) - len(filtered)
+        if widget_count:
+            log.info("  Stripped %d recommendation-widget items (AnyClip etc.)", widget_count)
+
+        if len(filtered) >= 10 and len(filtered) <= 60:
+            log.info("  Detected rendition list (%d variants at 0s duration after filtering)",
+                     len(filtered))
+            best = _pick_best_rendition(filtered)
+            if best:
+                vid_url = best.get("url") or best.get("webpage_url") or url
+                vid_title = best.get("title") or "Untitled"
+                w, h = best.get("width") or 0, best.get("height") or 0
+                log.info("  Picked best rendition: %dx%d — %s", w, h, vid_url[:120])
+                videos.append({"url": vid_url, "title": vid_title, "duration": 0})
+        elif len(filtered) > 60:
+            log.info("  %d items after filtering — too many for a rendition list, skipping",
+                     len(filtered))
+        elif len(filtered) < 10 and widget_count:
+            log.info("  Only %d non-widget items remain — not a rendition list", len(filtered))
 
     if not videos:
         videos = _try_html_fallback(url)
@@ -722,6 +848,9 @@ def run_harvester():
                 if send_to_telegram(clip, title, url):
                     sent = True
                     stats["sent"] += 1
+                    if clip.exists():
+                        clip.unlink()
+                        log.info("Deleted clip after Telegram send: %s", clip.name)
 
             # Record and cleanup
             record_story(history, url, title, clips_produced=len(clips), sent_to_telegram=sent)

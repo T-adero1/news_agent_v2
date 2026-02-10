@@ -30,7 +30,9 @@
       "WebFetch(domain:forum.videohelp.com)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:salsa.debian.org)",
-      "WebFetch(domain:www.khou.com)"
+      "WebFetch(domain:www.khou.com)",
+      "WebFetch(domain:www.msn.com)",
+      "Bash(curl:*)"
     ]
   }
 }
