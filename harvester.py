@@ -237,83 +237,20 @@ def search_news_stories() -> list:
             seen_urls.add(url)
             all_stories.append({"title": title, "url": url, "summary": ""})
 
-    log.info("Bing News returned %d unique stories from RSS", len(all_stories))
+    log.info("Bing News returned %d unique stories", len(all_stories))
 
-    # Also search YouTube for Houston TV news clips
-    yt_stories = _search_youtube_news()
-    for yt in yt_stories:
-        if yt["url"] not in seen_urls:
-            seen_urls.add(yt["url"])
-            all_stories.append(yt)
-
-    log.info("Total stories: %d (RSS + YouTube)", len(all_stories))
-
-    # Prioritize: YouTube first (guaranteed video), then TV news stations
+    # Prioritize TV news stations (more likely to have embedded video)
     tv_domains = ("click2houston.com", "khou.com", "abc13.com", "fox26houston.com",
                   "cw39.com", "kprc.com", "houstonchronicle.com", "msn.com")
     def _priority(story):
         domain = urlparse(story["url"]).netloc.lower()
-        if "youtube.com" in domain or "youtu.be" in domain:
-            return 0
-        if any(d in domain for d in tv_domains):
-            return 1
-        return 2
+        return 0 if any(d in domain for d in tv_domains) else 1
     all_stories.sort(key=_priority)
 
     for i, s in enumerate(all_stories[:NUM_STORIES]):
         log.info("  [%d] %s — %s", i + 1, s["title"][:80], s["url"][:80])
 
     return all_stories[:NUM_STORIES]
-
-
-def _search_youtube_news() -> list:
-    """Search YouTube for recent Houston news clips from local TV stations."""
-    queries = [
-        "Houston car accident crash news",
-        "Houston local news today",
-        "Houston trending news"
-    ]
-    results = []
-    seen = set()
-
-    for query in queries:
-        log.info("Searching YouTube: %s", query)
-        cmd = [
-            *YTDLP_CMD, f"ytsearch5:{query}",
-            "--dump-json", "--no-download", "--flat-playlist",
-        ]
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            continue
-
-        if result.returncode != 0:
-            continue
-
-        for line in result.stdout.strip().split("\n"):
-            if not line.strip():
-                continue
-            try:
-                info = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            vid_id = info.get("id", "")
-            if not vid_id or vid_id in seen:
-                continue
-            seen.add(vid_id)
-
-            duration = info.get("duration") or 0
-            if not (60 <= duration <= 900):
-                continue
-
-            url = info.get("url") or f"https://www.youtube.com/watch?v={vid_id}"
-            title = info.get("title") or "Untitled"
-            results.append({"title": title, "url": url, "summary": "YouTube"})
-            log.info("  YT: %s (%.0fs)", title[:80], duration)
-
-    log.info("YouTube search found %d suitable videos", len(results))
-    return results
 
 
 def _extract_bing_url(bing_url: str) -> str:
