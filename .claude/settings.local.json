@@ -24,7 +24,13 @@
       "WebFetch(domain:docs.perplexity.ai)",
       "WebFetch(domain:core.telegram.org)",
       "Bash(yt-dlp:*)",
-      "Bash(if exist harvester_history.json del harvester_history.json)"
+      "Bash(if exist harvester_history.json del harvester_history.json)",
+      "WebFetch(domain:www.fox26houston.com)",
+      "WebFetch(domain:dev.anvato.net)",
+      "WebFetch(domain:forum.videohelp.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:salsa.debian.org)",
+      "WebFetch(domain:www.khou.com)"
     ]
   }
 }

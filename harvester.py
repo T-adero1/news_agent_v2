@@ -16,12 +16,14 @@ import atexit
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -44,6 +46,18 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from tiktok_agent_v2.pipeline import run_pipeline
 
 log = logging.getLogger("harvester")
+
+_CST = ZoneInfo("America/Chicago")
+
+
+class _CSTFormatter(logging.Formatter):
+    """Formatter that renders timestamps in US-Central time."""
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=_CST)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.isoformat()
 
 LOCK_FILE = Path("harvester.lock")
 HISTORY_FILE = Path("harvester_history.json")
@@ -74,16 +88,23 @@ TOPICS = (
 def setup_logging():
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     log_path = TMP_DIR / "harvester.log"
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [harvester] %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[
-            logging.FileHandler(log_path, mode="a"),
-            logging.StreamHandler(),
-        ],
-        force=True,
+
+    fmt = _CSTFormatter(
+        fmt="%(asctime)s [harvester] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S CST",
     )
+
+    file_handler = logging.FileHandler(log_path, mode="a")
+    file_handler.setFormatter(fmt)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+    root.addHandler(file_handler)
+    root.addHandler(stream_handler)
+
     logging.getLogger("tiktok_agent_v2").setLevel(logging.INFO)
     log.info("Logging to %s", log_path)
 
@@ -273,6 +294,146 @@ def _extract_bing_url(bing_url: str) -> str:
 YTDLP_CMD = [sys.executable, "-m", "yt_dlp"]
 
 
+def _pick_best_rendition(items: list) -> dict | None:
+    """From a list of yt-dlp JSON entries, pick the highest-resolution one."""
+    best, best_pixels = None, 0
+    fallback = None
+    for item in items:
+        vid_url = item.get("url") or item.get("webpage_url")
+        if not vid_url:
+            continue
+        if fallback is None:
+            fallback = item
+        w = item.get("width") or 0
+        h = item.get("height") or 0
+        pixels = w * h
+        if pixels > best_pixels:
+            best_pixels = pixels
+            best = item
+    return best or fallback
+
+
+# ---------------------------------------------------------------------------
+# HTML Fallback Extraction (fox26 Anvato, khou meta tags, generic)
+# ---------------------------------------------------------------------------
+
+def _try_html_fallback(url: str) -> list:
+    """Fetch page HTML and attempt site-specific + generic video extraction.
+
+    Tries: Anvato player params → og:video / JSON-LD meta tags → bare m3u8/mp4 URLs.
+    Returns list of {url, title, duration} dicts (same shape as probe_page_for_videos).
+    """
+    log.info("  HTML fallback: fetching %s", url[:120])
+    try:
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as exc:
+        log.warning("  HTML fallback fetch failed: %s", exc)
+        return []
+
+    # Extract page title for use as video title fallback
+    title_match = re.search(r"<title[^>]*>([^<]+)</title>", html, re.IGNORECASE)
+    page_title = title_match.group(1).strip() if title_match else "Untitled"
+
+    # ── Strategy A: Anvato (fox26houston.com and similar) ─────────────────
+    anvato_id = None
+    for pat in (r'anvato\w*?["\s:=]+["\']?(\d{5,})', r'data-anvp="[^"]*\^(\d+)"'):
+        m = re.search(pat, html)
+        if m:
+            anvato_id = m.group(1)
+            break
+
+    access_key = None
+    for pat in (r'accessKey["\s:]+["\']([^"\']+)', r'anvack=([^&"\']+)'):
+        m = re.search(pat, html)
+        if m:
+            access_key = m.group(1)
+            break
+
+    if anvato_id and access_key:
+        log.info("  Anvato found: id=%s key=%s", anvato_id, access_key[:12])
+        # Try yt-dlp with anvato: URL first
+        anvato_url = f"anvato:{access_key}:{anvato_id}"
+        cmd = [*YTDLP_CMD, "--dump-json", "--no-download", anvato_url]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout.strip():
+                for line in result.stdout.strip().split("\n"):
+                    try:
+                        info = json.loads(line)
+                        vid_url = info.get("url") or info.get("webpage_url") or anvato_url
+                        vid_title = info.get("title") or page_title
+                        duration = info.get("duration") or 0
+                        log.info("  Anvato via yt-dlp: %s (%.0fs)", vid_title[:80], duration)
+                        return [{"url": vid_url, "title": vid_title, "duration": duration}]
+                    except json.JSONDecodeError:
+                        continue
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        log.info("  yt-dlp anvato: URL failed, trying Lura API")
+
+        # Fallback: Lura (Anvato) REST API
+        try:
+            api_url = f"https://tkx.mp.lura.live/rest/v2/mcp/video/{anvato_id}?anvack={access_key}"
+            api_resp = requests.get(api_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            if api_resp.status_code == 200:
+                data = api_resp.json()
+                for pub in data.get("published_urls", []):
+                    stream_url = pub.get("embed_url") or pub.get("url") or ""
+                    if stream_url and (".m3u8" in stream_url or ".mp4" in stream_url):
+                        duration = data.get("duration", 0)
+                        vid_title = data.get("def_title") or page_title
+                        log.info("  Lura API hit: %s (%.0fs)", vid_title[:80], duration)
+                        return [{"url": stream_url, "title": vid_title, "duration": duration}]
+                log.info("  Lura API returned no usable stream URLs")
+            else:
+                log.info("  Lura API returned HTTP %d", api_resp.status_code)
+        except Exception as exc:
+            log.info("  Lura API failed: %s", exc)
+
+    elif access_key and not anvato_id:
+        log.info("  Anvato access key found but no video ID — skipping Anvato strategy")
+    elif anvato_id and not access_key:
+        log.info("  Anvato video ID found but no access key — skipping Anvato strategy")
+
+    # ── Strategy B: Meta tags / JSON-LD ───────────────────────────────────
+    for meta_pat in (
+        r'<meta[^>]+property=["\']og:video(?::url)?["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:video(?::url)?',
+        r'<meta[^>]+name=["\']twitter:player:stream["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:player:stream',
+    ):
+        m = re.search(meta_pat, html, re.IGNORECASE)
+        if m:
+            stream = m.group(1)
+            if ".m3u8" in stream or ".mp4" in stream:
+                log.info("  Meta tag video: %s", stream[:120])
+                return [{"url": stream, "title": page_title, "duration": 0}]
+
+    # JSON-LD contentUrl
+    m = re.search(r'"contentUrl"\s*:\s*"([^"]+)"', html)
+    if m:
+        content_url = m.group(1)
+        if ".m3u8" in content_url or ".mp4" in content_url:
+            log.info("  JSON-LD contentUrl: %s", content_url[:120])
+            return [{"url": content_url, "title": page_title, "duration": 0}]
+
+    # ── Strategy C: Bare video URLs in HTML ───────────────────────────────
+    m3u8_urls = list(set(re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', html)))
+    mp4_urls = list(set(re.findall(r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', html)))
+
+    if m3u8_urls:
+        log.info("  Bare m3u8 URL found: %s", m3u8_urls[0][:120])
+        return [{"url": m3u8_urls[0], "title": page_title, "duration": 0}]
+    if mp4_urls:
+        log.info("  Bare mp4 URL found: %s", mp4_urls[0][:120])
+        return [{"url": mp4_urls[0], "title": page_title, "duration": 0}]
+
+    log.info("  HTML fallback found nothing")
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Video Discovery (yt-dlp probe)
 # ---------------------------------------------------------------------------
@@ -296,10 +457,14 @@ def probe_page_for_videos(url: str) -> list:
 
     if result.returncode != 0:
         stderr_short = (result.stderr or "")[:300]
-        log.info("No videos at %s (rc=%d): %s", url, result.returncode, stderr_short)
-        return []
+        log.info("yt-dlp found nothing (rc=%d): %s", result.returncode, stderr_short)
+        videos = _try_html_fallback(url)
+        if not videos:
+            log.info("  No suitable videos (need 1-15 min)")
+        return videos
 
     videos = []
+    zero_duration_items = []
     skipped = 0
     for line in result.stdout.strip().split("\n"):
         if not line.strip():
@@ -318,11 +483,28 @@ def probe_page_for_videos(url: str) -> list:
             log.info("  Found: %s (%.0fs)", vid_title[:80], duration)
         else:
             skipped += 1
+            if duration == 0:
+                zero_duration_items.append(info)
             if skipped <= 3:
                 log.info("  Skip (%.0fs, need 60-900s): %s", duration, vid_title[:80])
 
     if skipped > 3:
         log.info("  ... and %d more skipped (wrong duration)", skipped - 3)
+
+    # Detect rendition-list pages (e.g. click2houston JW Player embeds):
+    # many variants of the same video at 0s duration with direct MP4 URLs.
+    if not videos and len(zero_duration_items) >= 10:
+        log.info("  Detected rendition list (%d variants at 0s duration)", len(zero_duration_items))
+        best = _pick_best_rendition(zero_duration_items)
+        if best:
+            vid_url = best.get("url") or best.get("webpage_url") or url
+            vid_title = best.get("title") or "Untitled"
+            w, h = best.get("width") or 0, best.get("height") or 0
+            log.info("  Picked best rendition: %dx%d — %s", w, h, vid_url[:120])
+            videos.append({"url": vid_url, "title": vid_title, "duration": 0})
+
+    if not videos:
+        videos = _try_html_fallback(url)
 
     if not videos:
         log.info("  No suitable videos (need 1-15 min)")
