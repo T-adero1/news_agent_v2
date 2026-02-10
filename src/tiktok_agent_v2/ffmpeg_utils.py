@@ -101,13 +101,15 @@ def format_tiktok_center_crop(video_path: Path, out_path: Path, width: int = 108
 
 
 def _ffmpeg_safe_path(path: Path) -> str:
-    """Return a path string safe for FFmpeg filter arguments on Windows.
+    """Return a path string safe for FFmpeg filter arguments.
 
-    FFmpeg filter syntax treats colons and backslashes specially.
-    Convert to forward slashes and escape colons (e.g. C: -> C\\:).
+    FFmpeg filter syntax treats colons, backslashes and single-quotes specially.
+    We resolve to an absolute path, convert to forward slashes, and escape
+    colons and single-quotes so the path is safe *without* additional quoting.
     """
-    posix = str(path).replace("\\", "/")
+    posix = str(path.resolve()).replace("\\", "/")
     posix = posix.replace(":", "\\:")
+    posix = posix.replace("'", "\\'")
     return posix
 
 
@@ -138,7 +140,7 @@ def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> P
 
     if captions_path.suffix.lower() == ".ass":
         log.info("Caption renderer mode: ASS")
-        vf = f"ass='{safe}'"
+        vf = f"ass={safe}"
     else:
         log.info("Caption renderer mode: SRT/subtitles")
         style = (
@@ -153,27 +155,41 @@ def burn_in_captions(video_path: Path, captions_path: Path, out_path: Path) -> P
             "Alignment=2,"
             "MarginV=220"
         )
-        vf = f"subtitles='{safe}':force_style='{style}'"
+        vf = f"subtitles={safe}:force_style='{style}'"
 
     cmd = [
         "ffmpeg", "-y",
-        "-i", str(video_path),
+        "-i", str(video_path.resolve()),
         "-vf", vf,
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-c:a", "aac",
         "-pix_fmt", "yuv420p",
-        str(out_path),
+        str(out_path.resolve()),
     ]
     log.info("FFmpeg command: %s", cmd)
 
+    input_size = video_path.stat().st_size
+
     result = subprocess.run(cmd, capture_output=True)
+    stderr_text = result.stderr.decode("utf-8", errors="ignore")
     if result.returncode != 0:
-        stderr = result.stderr.decode("utf-8", errors="ignore")
-        raise RuntimeError(f"FFmpeg caption burn failed (rc={result.returncode}): {stderr}")
+        raise RuntimeError(f"FFmpeg caption burn failed (rc={result.returncode}): {stderr_text}")
+
+    # Log stderr even on success — libass warnings (font not found, etc.) appear here
+    if stderr_text:
+        for line in stderr_text.strip().split("\n")[-15:]:
+            log.info("  ffmpeg: %s", line.rstrip())
 
     if not out_path.exists() or out_path.stat().st_size == 0:
         raise RuntimeError(f"FFmpeg reported success but output missing/empty: {out_path}")
-    log.info("Caption burn complete: %s (%d bytes)", out_path, out_path.stat().st_size)
+
+    output_size = out_path.stat().st_size
+    log.info("Caption burn complete: %s (%d bytes, input was %d bytes)", out_path, output_size, input_size)
+
+    # Warn if output is suspiciously close to input size (captions may not have rendered)
+    if input_size > 0 and abs(output_size - input_size) / input_size < 0.01:
+        log.warning("Caption output size ~= input size — captions may not have rendered!")
+
     return out_path
 
