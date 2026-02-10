@@ -705,7 +705,6 @@ def run_harvester():
             downloaded = download_video(videos[0]["url"], story_dir)
             if not downloaded:
                 log.error("Download failed, skipping.")
-                record_story(history, url, title, clips_produced=0, sent_to_telegram=False)
                 stats["failed"] += 1
                 continue
 
@@ -714,7 +713,6 @@ def run_harvester():
             clips = process_video(downloaded, clip_dir)
             if not clips:
                 log.error("Pipeline produced no clips, skipping.")
-                record_story(history, url, title, clips_produced=0, sent_to_telegram=False)
                 stats["failed"] += 1
                 continue
 
@@ -734,7 +732,6 @@ def run_harvester():
 
         except Exception as exc:
             log.error("Story failed: %s", exc, exc_info=True)
-            record_story(history, url, title, clips_produced=0, sent_to_telegram=False)
             stats["failed"] += 1
 
     elapsed = time.monotonic() - t0
