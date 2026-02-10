@@ -21,7 +21,7 @@ def clip_video(video_path: Path, start: float, end: float, out_path: Path) -> Pa
     (
         ffmpeg
         .input(str(video_path), ss=start, t=max(0.1, end - start))
-        .output(str(out_path), vcodec="libx264", acodec="aac")
+        .output(str(out_path), vcodec="copy", acodec="copy")
         .overwrite_output()
         .run(quiet=True)
     )
@@ -62,6 +62,7 @@ def format_tiktok_blur(video_path: Path, out_path: Path, width: int = 1080, heig
             audio,
             str(out_path),
             vcodec="libx264",
+            preset="ultrafast",
             acodec="aac",
             pix_fmt="yuv420p",
         )
@@ -89,6 +90,7 @@ def format_tiktok_center_crop(video_path: Path, out_path: Path, width: int = 108
             inp.audio,
             str(out_path),
             vcodec="libx264",
+            preset="ultrafast",
             acodec="aac",
             pix_fmt="yuv420p",
         )

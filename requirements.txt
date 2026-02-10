@@ -5,3 +5,4 @@ ffmpeg-python
 rich
 requests
 python-dotenv
+yt-dlp

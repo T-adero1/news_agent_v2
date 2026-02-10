@@ -7,3 +7,6 @@ outputs/
 *.srt
 .DS_Store
 .env
+harvester_tmp/
+harvester_history.json
+harvester.lock

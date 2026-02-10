@@ -15,7 +15,16 @@
       "Bash(export:*)",
       "Bash(ls:*)",
       "Bash(ffprobe:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(set \"KMP_DUPLICATE_LIB_OK=TRUE\")",
+      "Bash(set \"PATH=C:\\\\Users\\\\tobya\\\\OneDrive\\\\Desktop\\\\deal_project\\\\news_agent_v2;%PATH%\")",
+      "Bash(where:*)",
+      "Bash(KMP_DUPLICATE_LIB_OK=TRUE python main.py:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.perplexity.ai)",
+      "WebFetch(domain:core.telegram.org)",
+      "Bash(yt-dlp:*)",
+      "Bash(if exist harvester_history.json del harvester_history.json)"
     ]
   }
 }
