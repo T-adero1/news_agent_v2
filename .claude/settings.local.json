@@ -32,7 +32,9 @@
       "WebFetch(domain:salsa.debian.org)",
       "WebFetch(domain:www.khou.com)",
       "WebFetch(domain:www.msn.com)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "WebFetch(domain:ai.google.dev)",
+      "WebFetch(domain:chuoling.github.io)"
     ]
   }
 }

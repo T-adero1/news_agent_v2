@@ -715,7 +715,7 @@ def process_video(video_path: Path, clip_dir: Path) -> list:
             motion_fps=2.0,
             motion_weight=0.4,
             text_weight=0.6,
-            format_method="blur",
+            format_method="smart-crop",
             out_width=1080,
             out_height=1920,
             llm_model="gpt-5-mini",

@@ -18,6 +18,7 @@ from tiktok_agent_v2.ffmpeg_utils import (
     format_tiktok_center_crop,
     burn_in_captions,
 )
+from tiktok_agent_v2.reframe import format_tiktok_smart_crop
 from tiktok_agent_v2.motion import compute_motion_scores, aggregate_motion_for_window
 from tiktok_agent_v2.transcript import transcribe
 from tiktok_agent_v2.ranker import score_transcript_segments, apply_time_decay, normalize
@@ -375,7 +376,9 @@ def run_pipeline(
         log.info("Clip %d: clip_video (stream copy) took %.1fs", idx, time.monotonic() - t0)
 
         t0 = time.monotonic()
-        if format_method == "center-crop":
+        if format_method == "smart-crop":
+            format_tiktok_smart_crop(raw_path, final_path, out_width, out_height)
+        elif format_method == "center-crop":
             format_tiktok_center_crop(raw_path, final_path, out_width, out_height)
         else:
             format_tiktok_blur(raw_path, final_path, out_width, out_height)
