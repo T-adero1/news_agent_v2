@@ -103,13 +103,20 @@ def format_tiktok_center_crop(video_path: Path, out_path: Path, width: int = 108
 def _ffmpeg_safe_path(path: Path) -> str:
     """Return a path string safe for FFmpeg filter arguments.
 
-    FFmpeg filter syntax treats colons, backslashes and single-quotes specially.
-    We resolve to an absolute path, convert to forward slashes, and escape
-    colons and single-quotes so the path is safe *without* additional quoting.
+    FFmpeg filter syntax treats colons and backslashes specially.  On Windows
+    the drive-letter colon (C:) breaks filter parsing regardless of escaping
+    method (backslash-colon and single-quote wrapping both fail on Windows FFmpeg builds).
+    Using a relative path avoids the drive letter entirely.
     """
-    posix = str(path.resolve()).replace("\\", "/")
-    posix = posix.replace(":", "\\:")
-    posix = posix.replace("'", "\\'")
+    import os
+    try:
+        rel = os.path.relpath(path.resolve())
+    except ValueError:
+        # Different drive — fall back to absolute with colon escaping
+        rel = str(path.resolve())
+    posix = rel.replace("\\", "/")
+    # Escape any remaining colons (only hit on cross-drive fallback)
+    posix = posix.replace(":", r"\:")
     return posix
 
 

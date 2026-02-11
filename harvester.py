@@ -294,6 +294,10 @@ def _extract_bing_url(bing_url: str) -> str:
 
 YTDLP_CMD = [sys.executable, "-m", "yt_dlp"]
 
+# CDN domains used by recommendation/widget players (AnyClip, Lura, etc.)
+# Videos from these domains are NOT the page's editorial content.
+_WIDGET_DOMAINS = {"anyclip.com", "anyclip-media.com", "lura.live"}
+
 
 def _pick_best_rendition(items: list) -> dict | None:
     """From a list of yt-dlp JSON entries, pick the highest-resolution one."""
@@ -421,8 +425,12 @@ def _try_html_fallback(url: str) -> list:
             return [{"url": content_url, "title": page_title, "duration": 0}]
 
     # ── Strategy C: Bare video URLs in HTML ───────────────────────────────
-    m3u8_urls = list(set(re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', html)))
-    mp4_urls = list(set(re.findall(r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', html)))
+    # Filter out recommendation-widget CDN domains (AnyClip etc.)
+    def _not_widget(u: str) -> bool:
+        return not any(wd in u for wd in _WIDGET_DOMAINS)
+
+    m3u8_urls = [u for u in set(re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', html)) if _not_widget(u)]
+    mp4_urls = [u for u in set(re.findall(r'https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*', html)) if _not_widget(u)]
 
     if m3u8_urls:
         log.info("  Bare m3u8 URL found: %s", m3u8_urls[0][:120])
@@ -601,7 +609,6 @@ def probe_page_for_videos(url: str) -> list:
     # many variants of the same video at 0s duration with direct MP4 URLs.
     # First strip out recommendation-widget items (AnyClip etc.) which can
     # produce 100-250+ items from their own CDN, then check what remains.
-    _WIDGET_DOMAINS = {"anyclip.com", "anyclip-media.com", "lura.live"}
     if not videos and len(zero_duration_items) >= 10:
         filtered = [
             item for item in zero_duration_items
@@ -826,20 +833,26 @@ def run_harvester():
                 record_story(history, url, title, clips_produced=0, sent_to_telegram=False)
                 continue
 
-            # Download first suitable video
+            # Try each video candidate until one produces clips
             story_dir = TMP_DIR / f"story_{story_num}"
-            downloaded = download_video(videos[0]["url"], story_dir)
-            if not downloaded:
-                log.error("Download failed, skipping.")
-                stats["failed"] += 1
-                continue
+            clips = []
+            for vid_idx, vid in enumerate(videos):
+                downloaded = download_video(vid["url"], story_dir)
+                if not downloaded:
+                    log.warning("Download failed for video %d/%d, trying next.", vid_idx + 1, len(videos))
+                    continue
 
-            # Run clip pipeline
-            clip_dir = story_dir / "clips"
-            clips = process_video(downloaded, clip_dir)
+                clip_dir = story_dir / "clips"
+                clips = process_video(downloaded, clip_dir)
+                if downloaded.exists():
+                    downloaded.unlink()
+                if clips:
+                    break
+                log.info("Video %d/%d produced no clips (no speech?), trying next.", vid_idx + 1, len(videos))
+
             if not clips:
-                log.error("Pipeline produced no clips, skipping.")
-                stats["failed"] += 1
+                log.info("No video candidate produced clips, skipping story.")
+                record_story(history, url, title, clips_produced=0, sent_to_telegram=False)
                 continue
 
             # Send to Telegram
@@ -855,9 +868,6 @@ def run_harvester():
             # Record and cleanup
             record_story(history, url, title, clips_produced=len(clips), sent_to_telegram=sent)
             stats["processed"] += 1
-
-            if downloaded.exists():
-                downloaded.unlink()
 
         except Exception as exc:
             log.error("Story failed: %s", exc, exc_info=True)

@@ -143,6 +143,8 @@ def run_pipeline(
     captions_max_words: int,
     captions_max_chars: int,
     strict_llm: bool = False,
+    hook_lead_in: float = 0.10,
+    hook_scan: bool = True,
 ):
     if not video_path.exists():
         raise FileNotFoundError(video_path)
@@ -153,8 +155,8 @@ def run_pipeline(
     video_size_mb = video_path.stat().st_size / (1024 * 1024)
     log.info("=== PIPELINE START ===")
     log.info("  Video: %s (%.1f MB)", video_path.name, video_size_mb)
-    log.info("  Settings: clips=%d duration=%.0fs format=%s captions=%s",
-             num_clips, clip_duration, format_method, captions_enabled)
+    log.info("  Settings: clips=%d duration=%.0fs format=%s captions=%s hook_lead_in=%.0f%%",
+             num_clips, clip_duration, format_method, captions_enabled, hook_lead_in * 100)
     log.info("  Whisper: model=%s device=%s", whisper_model, device)
     log.info("  LLM: model=%s batch=%d timeout=%ds strict=%s",
              llm_model, llm_batch_size, llm_timeout_s, strict_llm)
@@ -174,6 +176,13 @@ def run_pipeline(
     _flush_log_handlers()
     if not segments:
         console.print("[red]No transcript segments found[/red]")
+        return
+
+    # Quality gate: require a minimum amount of speech to produce useful clips
+    total_words = sum(len(seg.get("text", "").split()) for seg in segments)
+    if total_words < 10:
+        console.print(f"[red]Transcript too short ({total_words} words, need ≥10) — skipping[/red]")
+        log.warning("Transcript has only %d words — below minimum threshold of 10, skipping", total_words)
         return
 
     console.print(f"Transcript segments: {len(segments)}")
@@ -275,10 +284,9 @@ def run_pipeline(
         if len(selected) >= num_clips:
             break
 
-        # Expand window around the key segment to fill clip_duration
-        seg_mid = (seg["start"] + seg["end"]) / 2
-        half = clip_duration / 2
-        raw_start = seg_mid - half
+        # Hook-first: place peak near the START of the clip (lead_in_sec into it)
+        lead_in_sec = clip_duration * hook_lead_in
+        raw_start = seg["start"] - lead_in_sec
         start = max(0, raw_start)
         end = min(_video_duration, start + clip_duration)
         # Re-adjust start if end was clamped
@@ -286,10 +294,34 @@ def run_pipeline(
 
         log.info("  Considering seg id=%d [%.1fs-%.1fs] score=%.3f",
                  seg["id"], seg["start"], seg["end"], seg["combined_score"])
-        log.info("    Segment midpoint: %.1fs", seg_mid)
-        log.info("    Ideal window: %.1fs - %.1fs  (midpoint ± %.1fs)",
-                 raw_start, raw_start + clip_duration, half)
+        log.info("    Hook-first: peak at %.1fs, lead-in=%.1fs (%.0f%% of %.0fs clip)",
+                 seg["start"], lead_in_sec, hook_lead_in * 100, clip_duration)
+        log.info("    Ideal window: %.1fs - %.1fs", raw_start, raw_start + clip_duration)
         log.info("    Clamped window: %.1fs - %.1fs", start, end)
+
+        # Two-pass hook scan: check if the opening seconds are weak
+        # and shift forward to a stronger hook if one exists nearby
+        if not hook_scan:
+            log.info("    Hook scan: disabled")
+        else:
+            early_segs = [s for s in segments
+                          if s["end"] > start and s["start"] < start + 12]
+            if early_segs:
+                best_hook = max(early_segs, key=lambda s: s["text_score"])
+                if best_hook["start"] > start + 3:
+                    old_start = start
+                    start = max(0, best_hook["start"] - 2.0)
+                    end = min(_video_duration, start + clip_duration)
+                    start = max(0, end - clip_duration)
+                    log.info("    Hook scan: trimmed filler, shifted start %.1fs -> %.1fs "
+                             "(best opener seg id=%d at %.1fs, text_score=%.3f)",
+                             old_start, start, best_hook["id"], best_hook["start"],
+                             best_hook["text_score"])
+                else:
+                    log.info("    Hook scan: best opener in first 12s is seg id=%d at %.1fs (no shift needed)",
+                             best_hook["id"], best_hook["start"])
+            else:
+                log.info("    Hook scan: no segments in first 12s")
 
         # Snap to sentence boundaries so we don't cut mid-sentence
         start, end = _snap_to_sentences(start, end, segments, _video_duration)
