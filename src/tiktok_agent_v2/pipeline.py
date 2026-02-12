@@ -18,7 +18,6 @@ from tiktok_agent_v2.ffmpeg_utils import (
     format_tiktok_center_crop,
     burn_in_captions,
 )
-from tiktok_agent_v2.reframe import format_tiktok_smart_crop
 from tiktok_agent_v2.motion import compute_motion_scores, aggregate_motion_for_window
 from tiktok_agent_v2.transcript import transcribe
 from tiktok_agent_v2.ranker import score_transcript_segments, apply_time_decay, normalize
@@ -38,6 +37,43 @@ def _flush_log_handlers():
             handler.flush()
         except Exception:
             pass
+
+
+def _log_memory(label: str = ""):
+    """Log current process memory usage. Works on Linux and Windows."""
+    try:
+        import sys
+        if sys.platform == "linux":
+            # /proc/self/status is always available on Linux, no pip install needed
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        rss_kb = int(line.split()[1])
+                        log.info("  [MEM %s] RSS=%.0f MB", label, rss_kb / 1024)
+                        return
+        else:
+            import os
+            # Windows: rough estimate via private working set
+            import ctypes
+            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [("cb", ctypes.c_ulong),
+                            ("PageFaultCount", ctypes.c_ulong),
+                            ("PeakWorkingSetSize", ctypes.c_size_t),
+                            ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t),
+                            ("PeakPagefileUsage", ctypes.c_size_t)]
+            pmc = PROCESS_MEMORY_COUNTERS()
+            pmc.cb = ctypes.sizeof(pmc)
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            if ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
+                log.info("  [MEM %s] RSS=%.0f MB", label, pmc.WorkingSetSize / (1024 * 1024))
+                return
+    except Exception:
+        pass
 
 
 def _segments_in_window(segments, start, end):
@@ -161,6 +197,7 @@ def run_pipeline(
     log.info("  Whisper: model=%s device=%s", whisper_model, device)
     log.info("  LLM: model=%s batch=%d timeout=%ds strict=%s",
              llm_model, llm_batch_size, llm_timeout_s, strict_llm)
+    _log_memory("pipeline_start")
     _flush_log_handlers()
 
     console.print("[bold]1) Extracting audio[/bold]")
@@ -168,12 +205,17 @@ def run_pipeline(
     audio_path = out_dir / (video_path.stem + "_audio.wav")
     extract_audio(video_path, audio_path)
     log.info("Step 1 (extract_audio) took %.1fs", time.monotonic() - t0)
+    _log_memory("after_extract_audio")
     _flush_log_handlers()
 
     console.print("[bold]2) Transcribing[/bold]")
     t0 = time.monotonic()
     segments, info = transcribe(audio_path, model_name=whisper_model, device=device)
     log.info("Step 2 (transcribe) took %.1fs", time.monotonic() - t0)
+    _log_memory("after_transcribe")
+    _flush_log_handlers()
+
+    log.info("Step 2.1: quality gate check (%d segments)", len(segments) if segments else 0)
     _flush_log_handlers()
     if not segments:
         console.print("[red]No transcript segments found[/red]")
@@ -187,20 +229,26 @@ def run_pipeline(
         return
 
     console.print(f"Transcript segments: {len(segments)}")
-    log.info("=== TRANSCRIPT SEGMENTS ===")
+    log.info("=== TRANSCRIPT SEGMENTS (%d total, %d words) ===", len(segments), total_words)
     for seg in segments:
         log.info("  [%6.1fs - %6.1fs] %s", seg["start"], seg["end"], seg["text"])
     full_transcript_path = out_dir / "transcript_full.txt"
     _write_full_transcript(segments, full_transcript_path)
     log.info("Wrote full transcript: %s", full_transcript_path)
+    _flush_log_handlers()
 
     console.print("[bold]3) Motion scoring[/bold]")
+    log.info("Step 3: starting motion scoring (fps=%.1f)", motion_fps)
+    _flush_log_handlers()
     t0 = time.monotonic()
     motion_scores = compute_motion_scores(video_path, sample_fps=motion_fps)
-    log.info("Step 3 (motion_scoring) took %.1fs", time.monotonic() - t0)
+    log.info("Step 3 (motion_scoring) took %.1fs — %d samples", time.monotonic() - t0, len(motion_scores))
+    _log_memory("after_motion")
     _flush_log_handlers()
 
     console.print("[bold]4) Ranking segments[/bold]")
+    log.info("Step 4: starting ranking")
+    _flush_log_handlers()
     t0 = time.monotonic()
 
     # Assign stable ids for LLM scoring
@@ -376,13 +424,19 @@ def run_pipeline(
         log.info("Clip %d: clip_video (stream copy) took %.1fs", idx, time.monotonic() - t0)
 
         t0 = time.monotonic()
+        log.info("Clip %d: starting format_%s (raw=%s)", idx, format_method, raw_path.name)
+        _log_memory("before_format")
+        _flush_log_handlers()
         if format_method == "smart-crop":
+            from tiktok_agent_v2.reframe import format_tiktok_smart_crop
             format_tiktok_smart_crop(raw_path, final_path, out_width, out_height)
         elif format_method == "center-crop":
             format_tiktok_center_crop(raw_path, final_path, out_width, out_height)
         else:
             format_tiktok_blur(raw_path, final_path, out_width, out_height)
         log.info("Clip %d: format_tiktok_%s took %.1fs", idx, format_method, time.monotonic() - t0)
+        _log_memory("after_format")
+        _flush_log_handlers()
 
         if captions_enabled:
             log.info("=== CAPTION FLOW (clip %d) ===", idx)
