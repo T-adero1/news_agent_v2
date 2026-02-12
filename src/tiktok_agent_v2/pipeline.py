@@ -200,22 +200,26 @@ def run_pipeline(
     _log_memory("pipeline_start")
     _flush_log_handlers()
 
+    log.info(">>> Step 1: about to extract audio from %s", video_path.name)
+    _flush_log_handlers()
     console.print("[bold]1) Extracting audio[/bold]")
     t0 = time.monotonic()
     audio_path = out_dir / (video_path.stem + "_audio.wav")
     extract_audio(video_path, audio_path)
-    log.info("Step 1 (extract_audio) took %.1fs", time.monotonic() - t0)
+    log.info("<<< Step 1 (extract_audio) took %.1fs", time.monotonic() - t0)
     _log_memory("after_extract_audio")
     _flush_log_handlers()
 
+    log.info(">>> Step 2: about to transcribe %s (model=%s, device=%s)", audio_path.name, whisper_model, device)
+    _flush_log_handlers()
     console.print("[bold]2) Transcribing[/bold]")
     t0 = time.monotonic()
     segments, info = transcribe(audio_path, model_name=whisper_model, device=device)
-    log.info("Step 2 (transcribe) took %.1fs", time.monotonic() - t0)
+    log.info("<<< Step 2 (transcribe) took %.1fs", time.monotonic() - t0)
     _log_memory("after_transcribe")
     _flush_log_handlers()
 
-    log.info("Step 2.1: quality gate check (%d segments)", len(segments) if segments else 0)
+    log.info(">>> Step 2.1: quality gate check (%d segments)", len(segments) if segments else 0)
     _flush_log_handlers()
     if not segments:
         console.print("[red]No transcript segments found[/red]")
@@ -237,18 +241,18 @@ def run_pipeline(
     log.info("Wrote full transcript: %s", full_transcript_path)
     _flush_log_handlers()
 
-    console.print("[bold]3) Motion scoring[/bold]")
-    log.info("Step 3: starting motion scoring (fps=%.1f)", motion_fps)
+    log.info(">>> Step 3: about to score motion (fps=%.1f)", motion_fps)
     _flush_log_handlers()
+    console.print("[bold]3) Motion scoring[/bold]")
     t0 = time.monotonic()
     motion_scores = compute_motion_scores(video_path, sample_fps=motion_fps)
-    log.info("Step 3 (motion_scoring) took %.1fs — %d samples", time.monotonic() - t0, len(motion_scores))
+    log.info("<<< Step 3 (motion_scoring) took %.1fs — %d samples", time.monotonic() - t0, len(motion_scores))
     _log_memory("after_motion")
     _flush_log_handlers()
 
-    console.print("[bold]4) Ranking segments[/bold]")
-    log.info("Step 4: starting ranking")
+    log.info(">>> Step 4: about to rank segments (llm=%s)", llm_model)
     _flush_log_handlers()
+    console.print("[bold]4) Ranking segments[/bold]")
     t0 = time.monotonic()
 
     # Assign stable ids for LLM scoring
@@ -401,6 +405,8 @@ def run_pipeline(
     log.info("Pipeline elapsed so far: %.1fs", time.monotonic() - pipeline_t0)
     _flush_log_handlers()
 
+    log.info(">>> Step 5: extracting %d clip(s)", len(selected))
+    _flush_log_handlers()
     console.print("[bold]5) Extracting clips[/bold]")
     for idx, seg in enumerate(selected, start=1):
         raw_path = out_dir / f"clip_{idx:02d}_{int(seg['start'])}s_{int(seg['end'])}s_raw.mp4"
@@ -419,12 +425,15 @@ def run_pipeline(
         )
         log.info("Wrote clip transcript: %s", clip_transcript_path)
 
+        log.info("Clip %d: >>> clip_video %.1fs-%.1fs", idx, seg["start"], seg["end"])
+        _flush_log_handlers()
         t0 = time.monotonic()
         clip_video(video_path, seg["start"], seg["end"], raw_path)
-        log.info("Clip %d: clip_video (stream copy) took %.1fs", idx, time.monotonic() - t0)
+        log.info("Clip %d: <<< clip_video took %.1fs", idx, time.monotonic() - t0)
+        _flush_log_handlers()
 
         t0 = time.monotonic()
-        log.info("Clip %d: starting format_%s (raw=%s)", idx, format_method, raw_path.name)
+        log.info("Clip %d: >>> format_%s (raw=%s)", idx, format_method, raw_path.name)
         _log_memory("before_format")
         _flush_log_handlers()
         if format_method == "smart-crop":
@@ -434,12 +443,13 @@ def run_pipeline(
             format_tiktok_center_crop(raw_path, final_path, out_width, out_height)
         else:
             format_tiktok_blur(raw_path, final_path, out_width, out_height)
-        log.info("Clip %d: format_tiktok_%s took %.1fs", idx, format_method, time.monotonic() - t0)
+        log.info("Clip %d: <<< format_%s took %.1fs", idx, format_method, time.monotonic() - t0)
         _log_memory("after_format")
         _flush_log_handlers()
 
         if captions_enabled:
-            log.info("=== CAPTION FLOW (clip %d) ===", idx)
+            log.info("Clip %d: >>> caption flow starting", idx)
+            _flush_log_handlers()
 
             t0 = time.monotonic()
             has_ass = create_clip_captions_ass(
@@ -453,9 +463,11 @@ def run_pipeline(
             log.info("Clip %d: ASS generation took %.1fs (ok=%s)", idx, time.monotonic() - t0, has_ass)
 
             if has_ass:
+                log.info("Clip %d: >>> burn_in_captions", idx)
+                _flush_log_handlers()
                 t0 = time.monotonic()
                 burn_in_captions(final_path, captions_ass_path, captioned_path)
-                log.info("Clip %d: burn_in_captions took %.1fs", idx, time.monotonic() - t0)
+                log.info("Clip %d: <<< burn_in_captions took %.1fs", idx, time.monotonic() - t0)
             else:
                 log.warning("Clip %d: ASS generation failed, no captions for this clip", idx)
 

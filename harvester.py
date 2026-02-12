@@ -727,7 +727,7 @@ def process_video(video_path: Path, clip_dir: Path) -> list:
             strict_llm=True,
         )
     except Exception as exc:
-        log.error("Pipeline failed: %s", exc)
+        log.error("Pipeline failed: %s: %s", type(exc).__name__, exc, exc_info=True)
         return []
 
     clips = []
@@ -886,9 +886,41 @@ def run_harvester():
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _log_system_info():
+    """Log system diagnostics for debugging silent crashes."""
+    import platform
+    log.info("  Python: %s", sys.version.replace("\n", " "))
+    log.info("  Platform: %s", platform.platform())
+    try:
+        import numpy
+        log.info("  numpy: %s", numpy.__version__)
+    except Exception as e:
+        log.info("  numpy: IMPORT FAILED (%s)", e)
+    try:
+        import cv2
+        log.info("  cv2: %s", cv2.__version__)
+    except Exception as e:
+        log.info("  cv2: IMPORT FAILED (%s)", e)
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith(("MemTotal:", "MemAvailable:")):
+                    log.info("  %s", line.strip())
+    except Exception:
+        pass
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    log.info("  Process %s", line.strip())
+    except Exception:
+        pass
+
+
 def main():
     setup_logging()
     log.info("=== HARVESTER START ===")
+    _log_system_info()
     check_env()
     acquire_lock()
     sys.exit(run_harvester())
