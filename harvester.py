@@ -97,14 +97,19 @@ def setup_logging():
 
     file_handler = logging.FileHandler(log_path, mode="a")
     file_handler.setFormatter(fmt)
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(fmt)
 
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.handlers.clear()
     root.addHandler(file_handler)
-    root.addHandler(stream_handler)
+
+    # Only add a stream handler if stdout is a TTY (interactive).
+    # When cron redirects stdout to the same log file, having both
+    # a FileHandler and StreamHandler causes every line to appear twice.
+    if sys.stdout.isatty():
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(fmt)
+        root.addHandler(stream_handler)
 
     logging.getLogger("tiktok_agent_v2").setLevel(logging.INFO)
     log.info("Logging to %s", log_path)
@@ -699,7 +704,8 @@ def download_video(url: str, output_dir: Path) -> Path | None:
 def process_video(video_path: Path, clip_dir: Path) -> list:
     """Run the clip pipeline. Returns list of final clip Paths."""
     clip_dir.mkdir(parents=True, exist_ok=True)
-    log.info("Running pipeline: %s -> %s", video_path.name, clip_dir)
+    elapsed = time.monotonic() - _PROCESS_START
+    log.info("Running pipeline: %s -> %s (%.0fs since process start)", video_path.name, clip_dir, elapsed)
 
     try:
         run_pipeline(
@@ -917,9 +923,36 @@ def _log_system_info():
         pass
 
 
+_PROCESS_START = time.monotonic()
+
+
+def _install_signal_handlers():
+    """Log any kill signals so we can see WHY the process dies."""
+    import signal
+
+    def _on_signal(signum, _frame):
+        elapsed = time.monotonic() - _PROCESS_START
+        try:
+            signame = signal.Signals(signum).name
+        except Exception:
+            signame = "UNKNOWN"
+        log.critical("KILLED by signal %s (%d) after %.1fs", signame, signum, elapsed)
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+        raise SystemExit(128 + signum)
+
+    for name in ("SIGTERM", "SIGINT", "SIGHUP", "SIGALRM"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), _on_signal)
+
+
 def main():
     setup_logging()
-    log.info("=== HARVESTER START ===")
+    _install_signal_handlers()
+    log.info("=== HARVESTER START (PID %d) ===", os.getpid())
     _log_system_info()
     check_env()
     acquire_lock()

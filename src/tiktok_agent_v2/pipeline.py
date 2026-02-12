@@ -190,7 +190,7 @@ def run_pipeline(
 
     # Log video metadata for debugging server issues
     video_size_mb = video_path.stat().st_size / (1024 * 1024)
-    log.info("=== PIPELINE START ===")
+    log.info("=== PIPELINE START (PID %d) ===", os.getpid())
     log.info("  Video: %s (%.1f MB)", video_path.name, video_size_mb)
     log.info("  Settings: clips=%d duration=%.0fs format=%s captions=%s hook_lead_in=%.0f%%",
              num_clips, clip_duration, format_method, captions_enabled, hook_lead_in * 100)
@@ -200,7 +200,7 @@ def run_pipeline(
     _log_memory("pipeline_start")
     _flush_log_handlers()
 
-    log.info(">>> Step 1: about to extract audio from %s", video_path.name)
+    log.info(">>> Step 1: about to extract audio from %s (pipeline +0.0s)", video_path.name)
     _flush_log_handlers()
     console.print("[bold]1) Extracting audio[/bold]")
     t0 = time.monotonic()
