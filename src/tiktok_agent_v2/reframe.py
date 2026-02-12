@@ -343,12 +343,19 @@ def _render(
     src_fps,
     total_frames,
 ):
-    """Read every frame, crop, resize, pipe to FFmpeg."""
+    """Read every frame, crop, resize, pipe to FFmpeg.
+
+    Stderr is drained in a background thread to prevent the classic
+    subprocess deadlock where FFmpeg blocks writing progress info to a
+    full pipe buffer while we block writing pixels to stdin.
+    """
+    import threading
     import time
     t0 = time.monotonic()
 
     ffmpeg_cmd = [
         "ffmpeg", "-y",
+        "-loglevel", "warning",
         # Raw video from stdin
         "-f", "rawvideo",
         "-vcodec", "rawvideo",
@@ -373,9 +380,22 @@ def _render(
     proc = subprocess.Popen(
         ffmpeg_cmd,
         stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
+
+    # Drain stderr in a background thread so FFmpeg never blocks
+    stderr_chunks = []
+
+    def _drain_stderr():
+        try:
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+        except Exception:
+            pass
+
+    drain_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    drain_thread.start()
 
     cap = cv2.VideoCapture(str(video_path))
     frames_written = 0
@@ -409,18 +429,22 @@ def _render(
         try:
             proc.stdin.write(resized.tobytes())
             frames_written += 1
-        except BrokenPipeError:
+        except (BrokenPipeError, OSError):
             log.error("Smart-crop: FFmpeg pipe broke at frame %d", frame_idx)
             break
 
     cap.release()
 
-    proc.stdin.close()
-    _, stderr = proc.communicate()
+    try:
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass
+
+    proc.wait()
+    drain_thread.join(timeout=5)
 
     if proc.returncode != 0:
-        stderr_text = stderr.decode("utf-8", errors="ignore")
-        # Log last 10 lines of FFmpeg stderr for debugging
+        stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="ignore")
         for line in stderr_text.strip().split("\n")[-10:]:
             log.error("  ffmpeg: %s", line.rstrip())
         raise RuntimeError(f"Smart-crop FFmpeg render failed (rc={proc.returncode})")
